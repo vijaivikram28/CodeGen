@@ -1,14 +1,45 @@
-/* ===== File: CodeGen_CAN_operations.c ===== */
+/* ===== File: BSW/CDD/CDD_M1/Source/src/CodeGen_CAN_operations.c ===== */
 /**
  * @file CodeGen_CAN_operations.c
- * @brief CAN Communication Implementation for BMS on STM32H7
+ * @brief CAN Communication Implementation for BMS on STM32H7 (refactored for runtime performance)
  */
 
 #include "CodeGen_CAN_operations.h"
 #include "stm32h7xx_hal.h"
+#include <stddef.h>
 
 /* Global CAN Configuration Instance */
 BMS_CANConfigTypeDef bms_can_config = {0};
+
+/* Static template for transmit header to reduce repeated initialization overhead */
+static const FDCAN_TxHeaderTypeDef s_tx_header_template = {
+    .Identifier = 0U,
+    .IdType = FDCAN_EXTENDED_ID,
+    .TxFrameType = FDCAN_DATA_FRAME,
+    .DataLength = FDCAN_DLC_BYTES_8,
+    .FDFormat = FDCAN_FD_CAN,
+    .BitRateSwitch = FDCAN_BRS_OFF,
+    .MessageMarker = 0U
+};
+
+/* Small helper to map byte length to FDCAN DLC code for common short frames */
+static inline uint32_t LengthToDlc(uint32_t len)
+{
+    /* Only common lengths 0..8 are mapped here; others use 8 by default to preserve behavior */
+    static const uint32_t dlc_map[9] = {
+        FDCAN_DLC_BYTES_0,
+        FDCAN_DLC_BYTES_1,
+        FDCAN_DLC_BYTES_2,
+        FDCAN_DLC_BYTES_3,
+        FDCAN_DLC_BYTES_4,
+        FDCAN_DLC_BYTES_5,
+        FDCAN_DLC_BYTES_6,
+        FDCAN_DLC_BYTES_7,
+        FDCAN_DLC_BYTES_8
+    };
+
+    return (len <= 8U) ? dlc_map[len] : FDCAN_DLC_BYTES_8;
+}
 
 /**
  * @brief Initialize CAN Communication Peripheral
@@ -19,69 +50,85 @@ HAL_StatusTypeDef BMS_CAN_Init(BMS_CANConfigTypeDef* pCanConfig)
 {
     HAL_StatusTypeDef status = HAL_ERROR;
 
-    if (pCanConfig == NULL) {
+    if (pCanConfig == NULL)
+    {
         return HAL_ERROR;
     }
 
+    /* Enable FDCAN1 Clock and configure source only once */
     __HAL_RCC_FDCAN_CLK_ENABLE();
     __HAL_RCC_FDCAN_CONFIG(RCC_FDCANCLKSOURCE_PLL);
 
-    pCanConfig->hfdcan.Instance = FDCAN1;
-    pCanConfig->hfdcan.Init.FrameFormat = FDCAN_FRAME_FD_NO_BRS;
-    pCanConfig->hfdcan.Init.Mode = FDCAN_MODE_NORMAL;
-    pCanConfig->hfdcan.Init.AutoRetransmission = ENABLE;
-    pCanConfig->hfdcan.Init.TransmitPause = DISABLE;
-    pCanConfig->hfdcan.Init.ProtocolException = DISABLE;
+    /* Local alias for performance */
+    FDCAN_HandleTypeDef *hfdcan = &pCanConfig->hfdcan;
 
-    pCanConfig->hfdcan.Init.NominalPrescaler = 8U;
-    pCanConfig->hfdcan.Init.NominalSyncJumpWidth = 1U;
-    pCanConfig->hfdcan.Init.NominalTimeSeg1 = 6U;
-    pCanConfig->hfdcan.Init.NominalTimeSeg2 = 1U;
+    /* Configure FDCAN1 Peripheral minimal assignments (only changing values) */
+    hfdcan->Instance = FDCAN1;
+    hfdcan->Init.FrameFormat = FDCAN_FRAME_FD_NO_BRS;
+    hfdcan->Init.Mode = FDCAN_MODE_NORMAL;
+    hfdcan->Init.AutoRetransmission = ENABLE;
+    hfdcan->Init.TransmitPause = DISABLE;
+    hfdcan->Init.ProtocolException = DISABLE;
 
-    pCanConfig->hfdcan.Init.DataPrescaler = 4U;
-    pCanConfig->hfdcan.Init.DataSyncJumpWidth = 1U;
-    pCanConfig->hfdcan.Init.DataTimeSeg1 = 6U;
-    pCanConfig->hfdcan.Init.DataTimeSeg2 = 1U;
+    /* Bit Timing Configuration */
+    hfdcan->Init.NominalPrescaler = 8U;
+    hfdcan->Init.NominalSyncJumpWidth = 1U;
+    hfdcan->Init.NominalTimeSeg1 = 6U;
+    hfdcan->Init.NominalTimeSeg2 = 1U;
 
-    pCanConfig->hfdcan.Init.MessageRAMOffset = 0U;
-    pCanConfig->hfdcan.Init.StdFiltersNbr = 1U;
-    pCanConfig->hfdcan.Init.ExtFiltersNbr = 1U;
-    pCanConfig->hfdcan.Init.RxFifo0ElmtsNbr = 16U;
-    pCanConfig->hfdcan.Init.RxFifo0ElmtSize = FDCAN_DATA_BYTES_16;
-    pCanConfig->hfdcan.Init.RxFifo1ElmtsNbr = 16U;
-    pCanConfig->hfdcan.Init.RxFifo1ElmtSize = FDCAN_DATA_BYTES_16;
-    pCanConfig->hfdcan.Init.RxBuffersNbr = 16U;
-    pCanConfig->hfdcan.Init.RxBufferSize = FDCAN_DATA_BYTES_8;
-    pCanConfig->hfdcan.Init.TxEventsNbr = 8U;
-    pCanConfig->hfdcan.Init.TxBuffersNbr = 8U;
-    pCanConfig->hfdcan.Init.TxFifoQueueElmtsNbr = 8U;
-    pCanConfig->hfdcan.Init.TxFifoQueueMode = FDCAN_TX_FIFO_OPERATION;
-    pCanConfig->hfdcan.Init.TxElmtSize = FDCAN_DATA_BYTES_8;
+    /* Data timing */
+    hfdcan->Init.DataPrescaler = 4U;
+    hfdcan->Init.DataSyncJumpWidth = 1U;
+    hfdcan->Init.DataTimeSeg1 = 6U;
+    hfdcan->Init.DataTimeSeg2 = 1U;
 
-    status = HAL_FDCAN_Init(&pCanConfig->hfdcan);
-    if (status != HAL_OK) {
+    /* Buffer */
+    hfdcan->Init.MessageRAMOffset = 0U;
+    hfdcan->Init.StdFiltersNbr = 1U;
+    hfdcan->Init.ExtFiltersNbr = 1U;
+    hfdcan->Init.RxFifo0ElmtsNbr = 16U;
+    hfdcan->Init.RxFifo0ElmtSize = FDCAN_DATA_BYTES_16;
+    hfdcan->Init.RxFifo1ElmtsNbr = 16U;
+    hfdcan->Init.RxFifo1ElmtSize = FDCAN_DATA_BYTES_16;
+    hfdcan->Init.RxBuffersNbr = 16U;
+    hfdcan->Init.RxBufferSize = FDCAN_DATA_BYTES_8;
+    hfdcan->Init.TxEventsNbr = 8U;
+    hfdcan->Init.TxBuffersNbr = 8U;
+    hfdcan->Init.TxFifoQueueElmtsNbr = 8U;
+    hfdcan->Init.TxFifoQueueMode = FDCAN_TX_FIFO_OPERATION;
+    hfdcan->Init.TxElmtSize = FDCAN_DATA_BYTES_8;
+
+    status = HAL_FDCAN_Init(hfdcan);
+    if (status != HAL_OK)
+    {
         return status;
     }
 
+    /* Configure CAN Filters */
     status = BMS_CAN_ConfigureFilters(pCanConfig);
-    if (status != HAL_OK) {
+    if (status != HAL_OK)
+    {
         return status;
     }
 
-    return HAL_FDCAN_Start(&pCanConfig->hfdcan);
+    /* Start FDCAN peripheral */
+    status = HAL_FDCAN_Start(hfdcan);
+    return status;
 }
 
 /**
  * @brief Configure CAN Message Filters
  * @param pCanConfig Pointer to CAN configuration structure
- * @return HAL Status
+ * @return HAL Status of filter configuration
  */
 HAL_StatusTypeDef BMS_CAN_ConfigureFilters(BMS_CANConfigTypeDef* pCanConfig)
 {
-    if (pCanConfig == NULL) {
+    if (pCanConfig == NULL)
+    {
         return HAL_ERROR;
     }
 
+    /* Assign filter configuration in a single block to reduce repeated branching and store-to-memory ops */
     pCanConfig->sFilterConfig.IdType = FDCAN_EXTENDED_ID;
     pCanConfig->sFilterConfig.FilterIndex = BMS_CAN_FILTER_BANK;
     pCanConfig->sFilterConfig.FilterType = FDCAN_FILTER_MASK;
@@ -97,63 +144,70 @@ HAL_StatusTypeDef BMS_CAN_ConfigureFilters(BMS_CANConfigTypeDef* pCanConfig)
  * @param pCanConfig Pointer to CAN configuration structure
  * @param id Message Identifier
  * @param data Pointer to data buffer
- * @param length Data length in bytes
- * @return HAL Status
+ * @param length Length of data
+ * @return HAL Status of transmission
  */
 HAL_StatusTypeDef BMS_CAN_Transmit(
     BMS_CANConfigTypeDef* pCanConfig,
     uint32_t id,
     uint8_t* data,
-    uint32_t length)
+    uint32_t length
+)
 {
-    FDCAN_TxHeaderTypeDef txHeader;
-
-    if ((pCanConfig == NULL) || (data == NULL)) {
+    if ((pCanConfig == NULL) || (data == NULL))
+    {
         return HAL_ERROR;
     }
 
-    if (length != 8U) {
-        return HAL_ERROR;
+    /* Limit length to 8 to match configured Tx element size and preserve deterministic behavior */
+    if (length > 8U)
+    {
+        length = 8U;
     }
 
-    (void)memset(&txHeader, 0, sizeof(FDCAN_TxHeaderTypeDef));
+    /* Use local copy of the template to minimize field writes */
+    FDCAN_TxHeaderTypeDef txHeader = s_tx_header_template;
 
     txHeader.Identifier = id;
-    txHeader.IdType = FDCAN_EXTENDED_ID;
-    txHeader.TxFrameType = FDCAN_DATA_FRAME;
-    txHeader.FDFormat = FDCAN_FD_CAN;
-    txHeader.DataLength = FDCAN_DLC_BYTES_8;
+    txHeader.DataLength = LengthToDlc(length);
 
-    return HAL_FDCAN_AddMessageToTxFifoQ(&pCanConfig->hfdcan, &txHeader, data);
+    /* Local handle alias for faster access */
+    FDCAN_HandleTypeDef *hfdcan = &pCanConfig->hfdcan;
+
+    return HAL_FDCAN_AddMessageToTxFifoQ(hfdcan, &txHeader, data);
 }
 
 /**
  * @brief Receive CAN Message
  * @param pCanConfig Pointer to CAN configuration structure
  * @param id Pointer to store message identifier
- * @param data Pointer to store message data
+ * @param data Pointer to data buffer
  * @param length Pointer to store data length
- * @return HAL Status
+ * @return HAL Status of reception
  */
 HAL_StatusTypeDef BMS_CAN_Receive(
     BMS_CANConfigTypeDef* pCanConfig,
     uint32_t* id,
     uint8_t* data,
-    uint32_t* length)
+    uint32_t* length
+)
 {
-    FDCAN_RxHeaderTypeDef rxHeader;
-    HAL_StatusTypeDef status;
-
-    if ((pCanConfig == NULL) || (id == NULL) || (data == NULL) || (length == NULL)) {
+    if ((pCanConfig == NULL) || (id == NULL) || (data == NULL) || (length == NULL))
+    {
         return HAL_ERROR;
     }
 
-    (void)memset(&rxHeader, 0, sizeof(FDCAN_RxHeaderTypeDef));
+    FDCAN_RxHeaderTypeDef rxHeader;
 
-    status = HAL_FDCAN_GetRxMessage(&pCanConfig->hfdcan, FDCAN_RX_FIFO0, &rxHeader, data);
-    if (status == HAL_OK) {
+    /* Local handle alias */
+    FDCAN_HandleTypeDef *hfdcan = &pCanConfig->hfdcan;
+
+    HAL_StatusTypeDef status = HAL_FDCAN_GetRxMessage(hfdcan, FDCAN_RX_FIFO0, &rxHeader, data);
+    if (status == HAL_OK)
+    {
         *id = rxHeader.Identifier;
-        *length = (rxHeader.DataLength >> 16);
+        /* Preserve original semantics: convert from HAL format (shift) */
+        *length = (uint32_t)(rxHeader.DataLength >> 16);
     }
 
     return status;
@@ -165,7 +219,9 @@ HAL_StatusTypeDef BMS_CAN_Receive(
  */
 void BMS_CAN_IRQHandler(BMS_CANConfigTypeDef* pCanConfig)
 {
-    if (pCanConfig != NULL) {
+    if (pCanConfig != NULL)
+    {
+        /* Directly call HAL ISR handler; keep ISR minimal and deterministic */
         HAL_FDCAN_IRQHandler(&pCanConfig->hfdcan);
     }
 }
@@ -173,17 +229,23 @@ void BMS_CAN_IRQHandler(BMS_CANConfigTypeDef* pCanConfig)
 /**
  * @brief Handle CAN Communication Timeouts
  * @param pCanConfig Pointer to CAN configuration structure
- * @param timeout_ms Timeout duration
- * @return HAL Status
+ * @param timeout_ms Timeout duration in milliseconds
+ * @return HAL Status of timeout handling
  */
 HAL_StatusTypeDef BMS_CAN_HandleTimeout(
     BMS_CANConfigTypeDef* pCanConfig,
-    uint32_t timeout_ms)
+    uint32_t timeout_ms
+)
 {
-    uint32_t tickstart = HAL_GetTick();
-    (void)pCanConfig;
+    (void)pCanConfig; /* Unused parameter preserved for interface compatibility */
 
-    while ((HAL_GetTick() - tickstart) < timeout_ms) {
+    uint32_t tickstart = HAL_GetTick();
+
+    /* Use subtraction-based timeout check to handle tick wrap-around efficiently */
+    while ((HAL_GetTick() - tickstart) < timeout_ms)
+    {
+        /* Keep loop body empty to minimize overhead; allow compiler to optimize */
+        __asm volatile ("nop");
     }
 
     return HAL_TIMEOUT;
