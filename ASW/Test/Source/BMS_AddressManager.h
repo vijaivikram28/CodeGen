@@ -115,7 +115,8 @@ uint8_t BMS_AddressManager_GetSuccessRatePercent(uint8_t expected_racks);
  */
 static inline bool BMS_Address_IsValid(uint8_t addr)
 {
-    return (addr != 0U) && (addr <= (uint8_t)BMS_MAX_RACKS);
+    /* Explicit and defensive bounds check to avoid undefined behavior from callers */
+    return (addr != (uint8_t)0U) && (addr <= (uint8_t)BMS_MAX_RACKS);
 }
 
 #ifdef __cplusplus
