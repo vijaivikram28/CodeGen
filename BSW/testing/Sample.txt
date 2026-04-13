@@ -1,0 +1,1 @@
+This file is created for testing of git branch of Schneider Codegen.
